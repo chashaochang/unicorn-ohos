@@ -26,6 +26,25 @@ Unicorn offers some unparalleled features:
 
 Further information is available at http://www.unicorn-engine.org
 
+HarmonyOS Split-WX Notes
+------------------------
+
+This fork includes a HarmonyOS-oriented workaround for the platform's anonymous executable memory restriction.
+
+On recent HarmonyOS builds, anonymous memory can no longer be mapped or upgraded to executable with the usual JIT-style flow such as `mmap(PROT_EXEC | MAP_ANONYMOUS)` or `mprotect(..., PROT_EXEC)`. That breaks Unicorn's normal TCG code generation path because translated code is traditionally written into writable memory and then executed from that same anonymous region.
+
+To make Unicorn usable on HarmonyOS, this fork switches the TCG code buffer to a Split-WX model:
+
+- create a file-backed shared buffer instead of relying on anonymous executable memory
+- keep one writable mapping for code generation
+- keep a second executable mapping for execution
+- translate addresses between the RW and RX views where TCG and TB jump logic need it
+- flush the instruction cache against the executable view
+
+In short: write and execute are separated, so the runtime no longer depends on anonymous JIT pages.
+
+This solution direction was suggested by teachers from the Huawei ecosystem team. Special thanks to the Huawei ecosystem teachers for pointing us to the Split-WX approach and helping clarify how to adapt Unicorn to HarmonyOS platform restrictions.
+
 
 License
 -------
