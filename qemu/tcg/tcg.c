@@ -99,6 +99,16 @@ static QEMU_UNUSED_FUNC void tcg_register_jit_int(TCGContext *s, void *buf, size
                                  const void *debug_frame,
                                  size_t debug_frame_size);
 
+static inline void tcg_flush_splitwx_icache(TCGContext *s, void *start, void *stop)
+{
+    if (s->splitwx_enabled) {
+        uintptr_t diff = s->splitwx_diff;
+        flush_icache_range((uintptr_t)start + diff, (uintptr_t)stop + diff);
+        return;
+    }
+    flush_icache_range((uintptr_t)start, (uintptr_t)stop);
+}
+
 /* Forward declarations for functions declared and used in tcg-target.inc.c. */
 static const char *target_parse_constraint(TCGArgConstraint *ct,
                                            const char *ct_str, TCGType type);
@@ -834,7 +844,8 @@ void tcg_prologue_init(TCGContext *s)
     s->code_ptr = buf0;
     s->code_buf = buf0;
     s->data_gen_ptr = NULL;
-    s->code_gen_prologue = buf0;
+    s->code_gen_prologue = s->splitwx_enabled ?
+        (void *)((uintptr_t)buf0 + s->splitwx_diff) : buf0;
 
     /* Compute a high-water mark, at which we voluntarily flush the buffer
        and start over.  The size here is arbitrary, significantly larger
@@ -857,7 +868,7 @@ void tcg_prologue_init(TCGContext *s)
 #endif
 
     buf1 = s->code_ptr;
-    flush_icache_range((uintptr_t)buf0, (uintptr_t)buf1);
+    tcg_flush_splitwx_icache(s, buf0, buf1);
 
     /* Deduct the prologue from the buffer.  */
     prologue_size = tcg_current_code_size(s);
@@ -867,7 +878,10 @@ void tcg_prologue_init(TCGContext *s)
     total_size -= prologue_size;
     s->code_gen_buffer_size = total_size;
 
-    tcg_register_jit(s, s->code_gen_buffer, total_size);
+    tcg_register_jit(s, s->splitwx_enabled ?
+                     (void *)((uintptr_t)s->code_gen_buffer + s->splitwx_diff) :
+                     s->code_gen_buffer,
+                     total_size);
 
     /* Assert that goto_ptr is implemented completely.  */
     if (TCG_TARGET_HAS_goto_ptr) {
@@ -3857,7 +3871,7 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
     }
 
     /* flush instruction cache */
-    flush_icache_range((uintptr_t)s->code_buf, (uintptr_t)s->code_ptr);
+    tcg_flush_splitwx_icache(s, s->code_buf, s->code_ptr);
 
     return tcg_current_code_size(s);
 }

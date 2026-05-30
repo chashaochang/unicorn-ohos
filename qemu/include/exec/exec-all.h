@@ -323,6 +323,7 @@ struct TranslationBlock {
     uint32_t trace_vcpu_dstate;
 
     struct tb_tc tc;
+    void *tc_rw_ptr;
 
     /* original tb when cflags has CF_NOCACHE */
     struct TranslationBlock *orig_tb;

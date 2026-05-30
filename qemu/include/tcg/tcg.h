@@ -650,10 +650,13 @@ struct TCGContext {
     void *code_gen_epilogue;
     void *code_gen_buffer;
     void *initial_buffer;
+    void *initial_buffer_rx;
     size_t initial_buffer_size;
     size_t code_gen_buffer_size;
     void *code_gen_ptr;
     void *data_gen_ptr;
+    ptrdiff_t splitwx_diff;
+    bool splitwx_enabled;
 
     /* Threshold to flush the translated code buffer.  */
     void *code_gen_highwater;
@@ -1247,7 +1250,12 @@ static inline ptrdiff_t tcg_ptr_byte_diff(void *a, void *b)
 
 static inline ptrdiff_t tcg_pcrel_diff(TCGContext *s, void *target)
 {
-    return tcg_ptr_byte_diff(target, s->code_ptr);
+    void *code_ptr = s->code_ptr;
+
+    if (s->splitwx_enabled) {
+        code_ptr = (void *)((uintptr_t)code_ptr + s->splitwx_diff);
+    }
+    return tcg_ptr_byte_diff(target, code_ptr);
 }
 
 /**

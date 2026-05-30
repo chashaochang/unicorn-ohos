@@ -203,7 +203,11 @@ void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr)
 {
     if (TCG_TARGET_HAS_direct_jump) {
         uintptr_t offset = tb->jmp_target_arg[n];
-        uintptr_t tc_ptr = (uintptr_t)tb->tc.ptr;
+        uintptr_t tc_ptr = (uintptr_t)tb->tc_rw_ptr;
+        ptrdiff_t diff = (uintptr_t)tb->tc.ptr - (uintptr_t)tb->tc_rw_ptr;
+        if (diff != 0) {
+            addr -= diff;
+        }
         tb_target_set_jmp_target(tc_ptr, tc_ptr + offset, addr);
     } else {
         tb->jmp_target_arg[n] = addr;

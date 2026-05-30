@@ -155,7 +155,10 @@ void *HELPER(lookup_tb_ptr)(CPUArchState *env)
 
     tb = tb_lookup__cpu_state(cpu, &pc, &cs_base, &flags, curr_cflags());
     if (tb == NULL) {
-        return uc->tcg_ctx->code_gen_epilogue;
+        return uc->tcg_ctx->splitwx_enabled ?
+            (void *)((uintptr_t)uc->tcg_ctx->code_gen_epilogue +
+                     uc->tcg_ctx->splitwx_diff) :
+            uc->tcg_ctx->code_gen_epilogue;
     }
     return tb->tc.ptr;
 }
