@@ -45,6 +45,25 @@ In short: write and execute are separated, so the runtime no longer depends on a
 
 This solution direction was suggested by teachers from the Huawei ecosystem team. Special thanks to the Huawei ecosystem teachers for pointing us to the Split-WX approach and helping clarify how to adapt Unicorn to HarmonyOS platform restrictions.
 
+HarmonyOS Split-WX 说明（中文）
+-------------------------------
+
+这个分支包含了一套面向 HarmonyOS 的适配方案，用来解决平台对匿名可执行内存的限制问题。
+
+在较新的 HarmonyOS 版本上，应用不能再像传统 JIT 那样直接申请匿名可执行内存，也不能把匿名内存通过 `mprotect(..., PROT_EXEC)` 升级成可执行。对于 Unicorn 来说，这会直接影响 TCG 的动态代码生成流程，因为它原本依赖“先写入一块可写内存，再从这块匿名内存执行翻译代码”的模式。
+
+为了解决这个问题，这个仓库把 TCG 代码缓存切换到了 Split-WX（写 / 执行分离）方案：
+
+- 使用文件后端的共享内存，而不是匿名可执行内存
+- 保留一份 RW 映射，专门用于代码生成和写入
+- 保留一份 RX 映射，专门用于执行
+- 在 TCG 和 TB 跳转修补时，处理 RW / RX 两个视图之间的地址换算
+- 在执行视图上完成指令缓存刷新
+
+简单说，就是把“写代码”和“执行代码”彻底分开，从而避开 HarmonyOS 对匿名 JIT 页的限制。
+
+这条解决思路来自华为生态老师的建议，在此特别感谢华为生态的老师，帮助我们明确了 Split-WX 这个方向，以及 Unicorn 在 HarmonyOS 平台上的适配方式。
+
 
 License
 -------
