@@ -338,6 +338,9 @@ bool cpu_restore_state(CPUState *cpu, uintptr_t host_pc, bool will_exit)
      * tcg_init_ctx.code_gen_buffer check_offset will wrap to way
      * above the code_gen_buffer_size
      */
+    if (tcg_ctx->splitwx_enabled) {
+        host_pc -= tcg_ctx->splitwx_diff;
+    }
     check_offset = host_pc - (uintptr_t) uc->tcg_ctx->code_gen_buffer;
 
     if (check_offset < uc->tcg_ctx->code_gen_buffer_size) {
@@ -1006,12 +1009,132 @@ void free_code_gen_buffer(struct uc_struct *uc)
     }
 }
 #else
+#if defined(CONFIG_LINUX) || defined(__OHOS__)
+#include <fcntl.h>
+#include <unistd.h>
+#include <limits.h>
+#ifdef __linux__
+#include <linux/memfd.h>
+#include <sys/syscall.h>
+#endif
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
+static int tcg_memfd_create_compat(const char *name, unsigned int flags)
+{
+#if defined(SYS_memfd_create)
+    return syscall(SYS_memfd_create, name, flags);
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+static int tcg_create_tempfile(const char *dir, size_t size)
+{
+    int fd = -1;
+
+#ifdef O_TMPFILE
+    if (dir != NULL) {
+        fd = open(dir, O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+    }
+#endif
+    if (fd < 0 && dir != NULL) {
+        char tmpl[PATH_MAX];
+        int n = snprintf(tmpl, sizeof(tmpl), "%s/%s", dir, "tcg-jit-XXXXXX");
+        if (n > 0 && (size_t)n < sizeof(tmpl)) {
+            fd = mkstemp(tmpl);
+            if (fd >= 0) {
+                unlink(tmpl);
+            }
+        }
+    }
+    if (fd < 0) {
+        return -1;
+    }
+    if (ftruncate(fd, (off_t)size) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int tcg_create_splitwx_fd(size_t size)
+{
+    int fd = -1;
+    const char *dirs[] = {
+        getenv("TMPDIR"),
+        ".",
+        NULL,
+    };
+
+    fd = tcg_memfd_create_compat("tcg-jit", MFD_CLOEXEC);
+    if (fd >= 0) {
+        if (ftruncate(fd, (off_t)size) == 0) {
+            return fd;
+        }
+        close(fd);
+    }
+
+    for (int i = 0; dirs[i] != NULL; i++) {
+        if (dirs[i][0] == '\0') {
+            continue;
+        }
+        fd = tcg_create_tempfile(dirs[i], size);
+        if (fd >= 0) {
+            return fd;
+        }
+    }
+
+    return -1;
+}
+
+static bool alloc_code_gen_buffer_splitwx(struct uc_struct *uc, size_t size,
+                                          void **buf_rw)
+{
+    TCGContext *tcg_ctx = uc->tcg_ctx;
+    void *rw = MAP_FAILED;
+    void *rx = MAP_FAILED;
+    int fd;
+
+    fd = tcg_create_splitwx_fd(size);
+    if (fd < 0) {
+        return false;
+    }
+
+    rw = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (rw == MAP_FAILED) {
+        close(fd);
+        return false;
+    }
+
+    rx = mmap(NULL, size, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+    close(fd);
+    if (rx == MAP_FAILED) {
+        munmap(rw, size);
+        return false;
+    }
+
+    tcg_ctx->splitwx_enabled = true;
+    tcg_ctx->splitwx_diff = (char *)rx - (char *)rw;
+    tcg_ctx->initial_buffer_rx = rx;
+    *buf_rw = rw;
+    return true;
+}
+#endif
+
 void free_code_gen_buffer(struct uc_struct *uc)
 {
     TCGContext *tcg_ctx = uc->tcg_ctx;
     if (tcg_ctx->initial_buffer) {
         if (munmap(tcg_ctx->initial_buffer, tcg_ctx->initial_buffer_size)) {
             perror("fail code_gen_buffer");
+        }
+        if (tcg_ctx->splitwx_enabled && tcg_ctx->initial_buffer_rx) {
+            if (munmap(tcg_ctx->initial_buffer_rx, tcg_ctx->initial_buffer_size)) {
+                perror("fail code_gen_buffer_rx");
+            }
         }
     }
 }
@@ -1023,6 +1146,11 @@ static inline void *alloc_code_gen_buffer(struct uc_struct *uc)
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     size_t size = tcg_ctx->code_gen_buffer_size;
     void *buf;
+#if defined(CONFIG_LINUX) || defined(__OHOS__)
+    if (alloc_code_gen_buffer_splitwx(uc, size, &buf)) {
+        return buf;
+    }
+#endif
 #ifdef USE_MAP_JIT
     flags |= MAP_JIT;
 #endif
@@ -1078,6 +1206,9 @@ static inline void code_gen_alloc(struct uc_struct *uc, size_t tb_size)
     tcg_ctx->code_gen_buffer_size = size_code_gen_buffer(tb_size);
     tcg_ctx->code_gen_buffer = alloc_code_gen_buffer(uc);
     tcg_ctx->initial_buffer = tcg_ctx->code_gen_buffer;
+    if (!tcg_ctx->splitwx_enabled) {
+        tcg_ctx->initial_buffer_rx = tcg_ctx->initial_buffer;
+    }
     tcg_ctx->initial_buffer_size = tcg_ctx->code_gen_buffer_size;
     uc->tcg_buffer_size = tcg_ctx->initial_buffer_size;
     if (tcg_ctx->code_gen_buffer == NULL) {
@@ -1743,6 +1874,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 
     gen_code_buf = tcg_ctx->code_gen_ptr;
     tb->tc.ptr = gen_code_buf;
+    tb->tc_rw_ptr = gen_code_buf;
     tb->pc = pc;
     tb->cs_base = cs_base;
     tb->flags = flags;
@@ -1806,6 +1938,9 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
             g_assert_not_reached();
         }
     }
+    tb->tc.ptr = tcg_ctx->splitwx_enabled ?
+        (void *)((uintptr_t)tb->tc_rw_ptr + tcg_ctx->splitwx_diff) :
+        tb->tc_rw_ptr;
     search_size = encode_search(cpu->uc, tb, (uint8_t *)gen_code_buf + gen_code_size);
     if (unlikely(search_size < 0)) {
         goto buffer_overflow;

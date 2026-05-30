@@ -111,7 +111,7 @@ struct uc_struct;
 #include "sysemu/os-win32.h"
 #endif
 
-#ifdef CONFIG_POSIX
+#if defined(CONFIG_POSIX) || (!defined(_WIN32) && defined(__OHOS__))
 #include "sys/mman.h"
 #endif
 
